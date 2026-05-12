@@ -3,6 +3,7 @@ export interface NatsMessage {
   subject: string;
   replyTo: string | null;
   payload: string;
+  encoding: "text" | "base64";
   headers: Record<string, string>;
   timestamp: number;
   size: number;
@@ -10,7 +11,7 @@ export interface NatsMessage {
 
 export type ServerToClient =
   | { type: "connected"; serverInfo: Record<string, unknown> }
-  | { type: "message"; id: string; subject: string; replyTo: string | null; payload: string; headers: Record<string, string>; timestamp: number; size: number }
+  | { type: "message"; id: string; subject: string; replyTo: string | null; payload: string; encoding: "text" | "base64"; headers: Record<string, string>; timestamp: number; size: number }
   | { type: "subjects"; subjects: string[] }
   | { type: "published"; subject: string }
   | { type: "error"; message: string };

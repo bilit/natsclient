@@ -73,12 +73,11 @@ export class NatsProxy {
 
         const subject = msg.subject;
         const payloadBytes = msg.data;
-        let payload: string;
-        try {
-          payload = sc.decode(payloadBytes);
-        } catch {
-          payload = Buffer.from(payloadBytes).toString("base64");
-        }
+        const bufData = Buffer.from(payloadBytes);
+        const asUtf8 = bufData.toString("utf8");
+        const isText = Buffer.from(asUtf8, "utf8").equals(bufData);
+        const payload = isText ? asUtf8 : bufData.toString("base64");
+        const encoding = isText ? "text" : "base64";
 
         if (!this.seenSubjects.has(subject)) {
           this.seenSubjects.add(subject);
@@ -91,6 +90,7 @@ export class NatsProxy {
           subject,
           replyTo: msg.reply ?? null,
           payload,
+          encoding,
           headers: headersToRecord(msg.headers),
           timestamp: Date.now(),
           size: payloadBytes.length,

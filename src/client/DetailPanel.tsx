@@ -26,8 +26,10 @@ export function DetailPanel({ message }: Props) {
     );
   }
 
-  const pretty = prettyJson(message.payload);
+  const isBinary = message.encoding === "base64";
+  const pretty = !isBinary ? prettyJson(message.payload) : null;
   const headerEntries = Object.entries(message.headers);
+  const payloadDisplay = isBinary ? message.payload : (pretty ?? message.payload);
 
   return (
     <div style={{ flex: 1, overflow: "auto", padding: 16, fontSize: 13, color: "#cdd6f4", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -57,15 +59,25 @@ export function DetailPanel({ message }: Props) {
       <section style={{ flex: 1 }}>
         <SectionTitle>
           Payload
+          {isBinary && (
+            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#f38ba8", border: "1px solid #45475a" }}>
+              binary · base64
+            </span>
+          )}
+          {!isBinary && pretty && (
+            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#a6e3a1", border: "1px solid #45475a" }}>
+              JSON
+            </span>
+          )}
           <button
             onClick={() => navigator.clipboard.writeText(message.payload)}
-            style={{ marginLeft: 8, padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
+            style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
           >
             Copy
           </button>
         </SectionTitle>
         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-          {(pretty ?? message.payload) || <span style={{ color: "#45475a" }}>(empty)</span>}
+          {payloadDisplay || <span style={{ color: "#45475a" }}>(empty)</span>}
         </pre>
       </section>
     </div>

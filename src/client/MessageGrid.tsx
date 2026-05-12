@@ -1,13 +1,12 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
-import { ColDef, GridReadyEvent, GridApi, IRowNode } from "ag-grid-community";
+import { ColDef, GridReadyEvent, GridApi } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-alpine.css";
 import { NatsMessage } from "./types";
 
 interface Props {
   messages: NatsMessage[];
-  checkedSubjects: Set<string>;
   tabId: string;
   onSelect: (msg: NatsMessage) => void;
   selectedId: string | null;
@@ -82,29 +81,29 @@ const columnDefs: ColDef<NatsMessage>[] = [
   },
 ];
 
-export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, selectedId }: Props) {
+export function MessageGrid({ messages, tabId, onSelect, selectedId }: Props) {
   const gridApi = useRef<GridApi<NatsMessage> | null>(null);
   const [quickFilter, setQuickFilter] = useState("");
 
-  // Refs so callbacks always read latest values without needing to be recreated
-  const checkedSubjectsRef = useRef(checkedSubjects);
-  checkedSubjectsRef.current = checkedSubjects;
+  // Tracks what the grid was last told about
+  const gridStateRef = useRef({ tabId: "", messageCount: 0, lastItem: null as NatsMessage | null });
+
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const tabIdRef = useRef(tabId);
   tabIdRef.current = tabId;
 
-  // Tracks what state the grid has been told about
-  const gridStateRef = useRef({ tabId: "", messageCount: 0 });
-
   const onGridReady = useCallback((e: GridReadyEvent<NatsMessage>) => {
     gridApi.current = e.api;
     const msgs = messagesRef.current;
     e.api.setGridOption("rowData", msgs);
-    gridStateRef.current = { tabId: tabIdRef.current, messageCount: msgs.length };
+    gridStateRef.current = {
+      tabId: tabIdRef.current,
+      messageCount: msgs.length,
+      lastItem: msgs[msgs.length - 1] ?? null,
+    };
   }, []);
 
-  // Incremental updates via applyTransaction; full reset only on tab switch or clear
   useEffect(() => {
     const api = gridApi.current;
     if (!api) return;
@@ -112,39 +111,36 @@ export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, select
     const state = gridStateRef.current;
     const currLen = messages.length;
 
+    // Tab switched — full reset
     if (state.tabId !== tabId) {
       api.setGridOption("rowData", messages);
-      gridStateRef.current = { tabId, messageCount: currLen };
+      gridStateRef.current = { tabId, messageCount: currLen, lastItem: messages[currLen - 1] ?? null };
       return;
     }
 
     const prevLen = state.messageCount;
 
-    if (currLen === 0 && prevLen > 0) {
+    if (currLen === prevLen) return;
+
+    if (currLen === 0) {
       api.setGridOption("rowData", []);
     } else if (currLen > prevLen) {
-      api.applyTransaction({ add: messages.slice(prevLen) });
-      const lastVisible = api.getDisplayedRowCount() - 1;
-      if (lastVisible >= 0) api.ensureIndexVisible(lastVisible, "bottom");
-    } else if (currLen < prevLen && currLen > 0) {
-      // Shouldn't happen in normal usage; reset defensively
+      // Only use applyTransaction when the array grew by pure appends:
+      // check that the item previously at the tail is still at the same position.
+      const isPureAppend = prevLen === 0 || messages[prevLen - 1] === state.lastItem;
+      if (isPureAppend) {
+        api.applyTransaction({ add: messages.slice(prevLen) });
+      } else {
+        // Subject was re-checked — existing filtered items reappeared
+        api.setGridOption("rowData", messages);
+      }
+    } else {
+      // Array shrank (subject unchecked or clear) — full reset
       api.setGridOption("rowData", messages);
     }
 
-    gridStateRef.current = { ...state, messageCount: currLen };
+    gridStateRef.current = { tabId, messageCount: currLen, lastItem: messages[currLen - 1] ?? null };
   }, [messages, tabId]);
-
-  // Re-evaluate external filter when subject checkboxes change
-  useEffect(() => {
-    gridApi.current?.onFilterChanged();
-  }, [checkedSubjects]);
-
-  const isExternalFilterPresent = useCallback(() => true, []);
-
-  const doesExternalFilterPass = useCallback((node: IRowNode<NatsMessage>) => {
-    if (!node.data) return true;
-    return checkedSubjectsRef.current.has(node.data.subject);
-  }, []);
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -180,8 +176,6 @@ export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, select
           rowStyle={{ cursor: "pointer" }}
           suppressCellFocus
           animateRows={false}
-          isExternalFilterPresent={isExternalFilterPresent}
-          doesExternalFilterPass={doesExternalFilterPass}
         />
       </div>
     </div>
