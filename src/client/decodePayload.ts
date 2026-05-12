@@ -95,7 +95,13 @@ function fromBase64(s: string): Uint8Array | null {
   }
 }
 
-// Recursively decode bytes: decompress → UTF-8 → JSON → inner base64
+// Recursively decode bytes, trying every layer in order:
+//   1. decompress (gzip / zlib / raw-deflate) — covers "zlib then base64" when
+//      we arrive here after a base64 decode, and "base64 then zlib" when the
+//      outer caller decoded base64 first and passed the raw compressed bytes
+//   2. UTF-8 text → JSON
+//   3. detect inner base64/base64url layer and recurse (handles double-encoding
+//      and any combination: base64→zlib→base64→json etc.)
 async function decodeBytes(
   bytes: Uint8Array,
   steps: string[],
@@ -105,24 +111,27 @@ async function decodeBytes(
     return { display: toHexDump(bytes), steps: [...steps, "hex"] };
   }
 
-  // Try decompression first (magic bytes guide format priority)
+  // Attempt decompression first — magic bytes guide format priority so the
+  // right format is almost always tried first.
   const dc = await decompress(bytes);
   if (dc) {
     return decodeBytes(dc.data, [...steps, dc.format], depth + 1);
   }
 
-  // Try UTF-8 text
+  // Attempt UTF-8 decode
   const text = toUtf8(bytes);
   if (text !== null) {
     const json = prettyJson(text);
     if (json) return { display: json, steps: [...steps, "json"] };
 
-    // Check for a further base64 layer (double-encoded) but only once
-    if (depth < 2) {
+    // Detect a further base64/base64url layer and recurse.
+    // Guard is depth < 4 (not 2) so long chains like
+    // base64 → gzip → base64 → gzip → json are fully unwound.
+    if (depth < 4) {
       const inner = fromBase64(text);
       if (inner) {
         const inner2 = await decodeBytes(inner, [...steps, "base64"], depth + 1);
-        // Only accept if we got past just hex (i.e. something meaningful decoded)
+        // Only accept if we decoded past a bare hex dump (i.e. something useful)
         if (inner2.steps[inner2.steps.length - 1] !== "hex") return inner2;
       }
     }
@@ -130,7 +139,7 @@ async function decodeBytes(
     return { display: text, steps };
   }
 
-  // Couldn't decode as text — hex dump
+  // Nothing worked — hex dump as last resort
   return { display: toHexDump(bytes), steps: [...steps, "hex"] };
 }
 

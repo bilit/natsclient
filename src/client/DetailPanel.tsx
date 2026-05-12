@@ -12,9 +12,12 @@ function formatTime(ts: number): string {
 
 export function DetailPanel({ message }: Props) {
   const [decoded, setDecoded] = useState<DecodeResult | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
 
   useEffect(() => {
-    if (!message) { setDecoded(null); return; }
+    setDecoded(null);
+    setShowRaw(false);
+    if (!message) return;
     let cancelled = false;
     decodePayload(message.payload, message.encoding).then((r) => {
       if (!cancelled) setDecoded(r);
@@ -30,7 +33,8 @@ export function DetailPanel({ message }: Props) {
     );
   }
 
-  const display = decoded?.display ?? message.payload;
+  const hasDecoded = decoded !== null;
+  const display = showRaw || !hasDecoded ? message.payload : decoded.display;
   const steps = decoded?.steps ?? (message.encoding === "base64" ? ["base64"] : []);
   const headerEntries = Object.entries(message.headers);
 
@@ -62,8 +66,9 @@ export function DetailPanel({ message }: Props) {
       <section style={{ flex: 1 }}>
         <SectionTitle>
           Payload
+          {/* Decode-chain badges — dimmed when viewing raw */}
           {steps.length > 0 && (
-            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6 }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6, opacity: showRaw ? 0.4 : 1 }}>
               {steps.map((s, i) => (
                 <React.Fragment key={i}>
                   {i > 0 && <span style={{ color: "#45475a", fontSize: 10 }}>→</span>}
@@ -81,11 +86,20 @@ export function DetailPanel({ message }: Props) {
               ))}
             </span>
           )}
+          {/* Toggle between decoded and raw view */}
+          {hasDecoded && (
+            <button
+              onClick={() => setShowRaw((r) => !r)}
+              style={{ marginLeft: 6, padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: showRaw ? "#45475a" : "#313244", color: "#cdd6f4", cursor: "pointer" }}
+            >
+              {showRaw ? "decoded" : "raw"}
+            </button>
+          )}
           <button
-            onClick={() => navigator.clipboard.writeText(message.payload)}
+            onClick={() => navigator.clipboard.writeText(display)}
             style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
           >
-            Copy raw
+            Copy
           </button>
         </SectionTitle>
         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
