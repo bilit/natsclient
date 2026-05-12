@@ -163,9 +163,6 @@ export function App() {
   }
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
-  const visibleMessages = activeTab
-    ? activeTab.messages.filter((m) => activeTab.checkedSubjects.has(m.subject))
-    : [];
 
   // Start with one empty tab on mount
   useEffect(() => {
@@ -186,7 +183,7 @@ export function App() {
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #313244", fontSize: 12, color: "#6c7086" }}>
-              <span>{visibleMessages.length} messages</span>
+              <span>{activeTab.messages.length} messages</span>
               <div style={{ flex: 1 }} />
               <button onClick={clearMessages} style={actionBtn}>Clear</button>
               <button onClick={togglePause} style={{ ...actionBtn, color: paused ? "#a6e3a1" : "#cdd6f4" }}>
@@ -195,7 +192,9 @@ export function App() {
             </div>
             <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
               <MessageGrid
-                messages={visibleMessages}
+                messages={activeTab.messages}
+                checkedSubjects={activeTab.checkedSubjects}
+                tabId={activeTab.id}
                 onSelect={setSelectedMsg}
                 selectedId={selectedMsg?.id ?? null}
               />
