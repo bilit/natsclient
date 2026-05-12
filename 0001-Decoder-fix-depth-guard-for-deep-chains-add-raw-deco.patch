@@ -1,0 +1,154 @@
+From 7dc90317389da70ef3df82f7a1cf78b1fd85eaae Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 12 May 2026 22:35:14 +0000
+Subject: [PATCH] Decoder: fix depth guard for deep chains; add raw/decoded
+ toggle in detail panel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+decodePayload.ts: inner-base64 check was gated on depth < 2 which silently
+dropped the third and deeper layers in chains like base64→gzip→base64→json.
+Changed to depth < 4 (overall recursion cap is still > 4 at the top).  Both
+orderings — base64-then-zlib and zlib-then-base64 — were already handled by
+the existing recursive structure; added a comment making this explicit.
+
+DetailPanel: new showRaw state toggled by a "raw / decoded" button that appears
+whenever a transformation was applied.  Showing raw displays the original wire
+payload (the base64 string for binary messages, or the original text).  Decode
+chain badges are dimmed (not hidden) while in raw view so you can still read
+what transforms exist.  "Copy" button copies whatever is currently displayed.
+showRaw resets to false whenever a new message is selected.
+
+https://claude.ai/code/session_01AkrmDxxeHDSgFUecYSnsXa
+---
+ src/client/DetailPanel.tsx  | 24 +++++++++++++++++++-----
+ src/client/decodePayload.ts | 23 ++++++++++++++++-------
+ 2 files changed, 35 insertions(+), 12 deletions(-)
+
+diff --git a/src/client/DetailPanel.tsx b/src/client/DetailPanel.tsx
+index c07cf1c..31cfa1f 100644
+--- a/src/client/DetailPanel.tsx
++++ b/src/client/DetailPanel.tsx
+@@ -12,9 +12,12 @@ function formatTime(ts: number): string {
+ 
+ export function DetailPanel({ message }: Props) {
+   const [decoded, setDecoded] = useState<DecodeResult | null>(null);
++  const [showRaw, setShowRaw] = useState(false);
+ 
+   useEffect(() => {
+-    if (!message) { setDecoded(null); return; }
++    setDecoded(null);
++    setShowRaw(false);
++    if (!message) return;
+     let cancelled = false;
+     decodePayload(message.payload, message.encoding).then((r) => {
+       if (!cancelled) setDecoded(r);
+@@ -30,7 +33,8 @@ export function DetailPanel({ message }: Props) {
+     );
+   }
+ 
+-  const display = decoded?.display ?? message.payload;
++  const hasDecoded = decoded !== null;
++  const display = showRaw || !hasDecoded ? message.payload : decoded.display;
+   const steps = decoded?.steps ?? (message.encoding === "base64" ? ["base64"] : []);
+   const headerEntries = Object.entries(message.headers);
+ 
+@@ -62,8 +66,9 @@ export function DetailPanel({ message }: Props) {
+       <section style={{ flex: 1 }}>
+         <SectionTitle>
+           Payload
++          {/* Decode-chain badges — dimmed when viewing raw */}
+           {steps.length > 0 && (
+-            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6 }}>
++            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6, opacity: showRaw ? 0.4 : 1 }}>
+               {steps.map((s, i) => (
+                 <React.Fragment key={i}>
+                   {i > 0 && <span style={{ color: "#45475a", fontSize: 10 }}>→</span>}
+@@ -81,11 +86,20 @@ export function DetailPanel({ message }: Props) {
+               ))}
+             </span>
+           )}
++          {/* Toggle between decoded and raw view */}
++          {hasDecoded && (
++            <button
++              onClick={() => setShowRaw((r) => !r)}
++              style={{ marginLeft: 6, padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: showRaw ? "#45475a" : "#313244", color: "#cdd6f4", cursor: "pointer" }}
++            >
++              {showRaw ? "decoded" : "raw"}
++            </button>
++          )}
+           <button
+-            onClick={() => navigator.clipboard.writeText(message.payload)}
++            onClick={() => navigator.clipboard.writeText(display)}
+             style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
+           >
+-            Copy raw
++            Copy
+           </button>
+         </SectionTitle>
+         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+diff --git a/src/client/decodePayload.ts b/src/client/decodePayload.ts
+index ab760c3..efa5bee 100644
+--- a/src/client/decodePayload.ts
++++ b/src/client/decodePayload.ts
+@@ -95,7 +95,13 @@ function fromBase64(s: string): Uint8Array | null {
+   }
+ }
+ 
+-// Recursively decode bytes: decompress → UTF-8 → JSON → inner base64
++// Recursively decode bytes, trying every layer in order:
++//   1. decompress (gzip / zlib / raw-deflate) — covers "zlib then base64" when
++//      we arrive here after a base64 decode, and "base64 then zlib" when the
++//      outer caller decoded base64 first and passed the raw compressed bytes
++//   2. UTF-8 text → JSON
++//   3. detect inner base64/base64url layer and recurse (handles double-encoding
++//      and any combination: base64→zlib→base64→json etc.)
+ async function decodeBytes(
+   bytes: Uint8Array,
+   steps: string[],
+@@ -105,24 +111,27 @@ async function decodeBytes(
+     return { display: toHexDump(bytes), steps: [...steps, "hex"] };
+   }
+ 
+-  // Try decompression first (magic bytes guide format priority)
++  // Attempt decompression first — magic bytes guide format priority so the
++  // right format is almost always tried first.
+   const dc = await decompress(bytes);
+   if (dc) {
+     return decodeBytes(dc.data, [...steps, dc.format], depth + 1);
+   }
+ 
+-  // Try UTF-8 text
++  // Attempt UTF-8 decode
+   const text = toUtf8(bytes);
+   if (text !== null) {
+     const json = prettyJson(text);
+     if (json) return { display: json, steps: [...steps, "json"] };
+ 
+-    // Check for a further base64 layer (double-encoded) but only once
+-    if (depth < 2) {
++    // Detect a further base64/base64url layer and recurse.
++    // Guard is depth < 4 (not 2) so long chains like
++    // base64 → gzip → base64 → gzip → json are fully unwound.
++    if (depth < 4) {
+       const inner = fromBase64(text);
+       if (inner) {
+         const inner2 = await decodeBytes(inner, [...steps, "base64"], depth + 1);
+-        // Only accept if we got past just hex (i.e. something meaningful decoded)
++        // Only accept if we decoded past a bare hex dump (i.e. something useful)
+         if (inner2.steps[inner2.steps.length - 1] !== "hex") return inner2;
+       }
+     }
+@@ -130,7 +139,7 @@ async function decodeBytes(
+     return { display: text, steps };
+   }
+ 
+-  // Couldn't decode as text — hex dump
++  // Nothing worked — hex dump as last resort
+   return { display: toHexDump(bytes), steps: [...steps, "hex"] };
+ }
+ 
+-- 
+2.43.0
+
