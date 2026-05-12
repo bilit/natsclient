@@ -5,6 +5,10 @@ import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-alpine.css";
 import { NatsMessage } from "./types";
 
+// Stable empty array — never reassigned, so AgGridReact never sees a changed
+// rowData prop and never re-initialises its row model on a parent re-render.
+const EMPTY_ROWS: NatsMessage[] = [];
+
 interface Props {
   messages: NatsMessage[];
   tabId: string;
@@ -168,7 +172,7 @@ export function MessageGrid({ messages, tabId, onSelect, selectedId }: Props) {
       <div className="ag-theme-alpine-dark" style={{ flex: 1, overflow: "hidden" }}>
         <AgGridReact<NatsMessage>
           columnDefs={columnDefs}
-          rowData={[]}
+          rowData={EMPTY_ROWS}
           rowSelection="single"
           getRowId={(p) => p.data.id}
           onGridReady={onGridReady}

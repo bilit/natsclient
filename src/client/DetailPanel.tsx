@@ -1,16 +1,9 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { NatsMessage } from "./types";
+import { decodePayload, DecodeResult, formatLabel } from "./decodePayload";
 
 interface Props {
   message: NatsMessage | null;
-}
-
-function prettyJson(s: string): string | null {
-  try {
-    return JSON.stringify(JSON.parse(s), null, 2);
-  } catch {
-    return null;
-  }
 }
 
 function formatTime(ts: number): string {
@@ -18,6 +11,17 @@ function formatTime(ts: number): string {
 }
 
 export function DetailPanel({ message }: Props) {
+  const [decoded, setDecoded] = useState<DecodeResult | null>(null);
+
+  useEffect(() => {
+    if (!message) { setDecoded(null); return; }
+    let cancelled = false;
+    decodePayload(message.payload, message.encoding).then((r) => {
+      if (!cancelled) setDecoded(r);
+    });
+    return () => { cancelled = true; };
+  }, [message]);
+
   if (!message) {
     return (
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "#45475a", fontSize: 13 }}>
@@ -26,10 +30,9 @@ export function DetailPanel({ message }: Props) {
     );
   }
 
-  const isBinary = message.encoding === "base64";
-  const pretty = !isBinary ? prettyJson(message.payload) : null;
+  const display = decoded?.display ?? message.payload;
+  const steps = decoded?.steps ?? (message.encoding === "base64" ? ["base64"] : []);
   const headerEntries = Object.entries(message.headers);
-  const payloadDisplay = isBinary ? message.payload : (pretty ?? message.payload);
 
   return (
     <div style={{ flex: 1, overflow: "auto", padding: 16, fontSize: 13, color: "#cdd6f4", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -59,25 +62,34 @@ export function DetailPanel({ message }: Props) {
       <section style={{ flex: 1 }}>
         <SectionTitle>
           Payload
-          {isBinary && (
-            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#f38ba8", border: "1px solid #45475a" }}>
-              binary · base64
-            </span>
-          )}
-          {!isBinary && pretty && (
-            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#a6e3a1", border: "1px solid #45475a" }}>
-              JSON
+          {steps.length > 0 && (
+            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6 }}>
+              {steps.map((s, i) => (
+                <React.Fragment key={i}>
+                  {i > 0 && <span style={{ color: "#45475a", fontSize: 10 }}>→</span>}
+                  <span style={{
+                    padding: "1px 5px",
+                    fontSize: 10,
+                    borderRadius: 3,
+                    border: "1px solid #45475a",
+                    background: "#313244",
+                    color: s === "json" ? "#a6e3a1" : s === "hex" ? "#f38ba8" : "#89dceb",
+                  }}>
+                    {formatLabel(s)}
+                  </span>
+                </React.Fragment>
+              ))}
             </span>
           )}
           <button
             onClick={() => navigator.clipboard.writeText(message.payload)}
             style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
           >
-            Copy
+            Copy raw
           </button>
         </SectionTitle>
         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-          {payloadDisplay || <span style={{ color: "#45475a" }}>(empty)</span>}
+          {display || <span style={{ color: "#45475a" }}>(empty)</span>}
         </pre>
       </section>
     </div>
