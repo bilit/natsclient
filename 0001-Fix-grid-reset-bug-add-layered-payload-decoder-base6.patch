@@ -1,0 +1,341 @@
+From 2a8f5772272b57d1ed795fa805beab5d087300e1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 12 May 2026 22:12:03 +0000
+Subject: [PATCH] Fix grid reset bug; add layered payload decoder (base64 +
+ zlib + JSON)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Grid reset bug: rowData={[]} in JSX creates a new array literal on every
+render, so AgGridReact saw a changed rowData prop and wiped its row model
+on every parent re-render — including any click that updated selectedMsg.
+Fix: module-level EMPTY_ROWS constant passed as rowData so the reference
+never changes after mount; all data management goes through the imperative
+API (applyTransaction / setGridOption) exclusively.
+
+Payload decoding (decodePayload.ts):
+- For binary payloads (encoding: base64): decode base64 → try gzip/zlib/
+  deflate via DecompressionStream (magic-byte priority) → UTF-8 → JSON →
+  inner base64 layer (up to depth 4 total).
+- For text payloads: fast-path JSON check, then detect base64/base64url and
+  run the same pipeline on the decoded bytes.  Only surfaces a result when a
+  meaningful transform was achieved (skips showing hex for short strings that
+  happen to match the base64 charset).
+- Hex dump fallback for payloads that can't be decoded as UTF-8.
+DetailPanel shows decode steps as coloured badges (base64 → gzip → json)
+with arrows between them. "Copy raw" always copies the original wire value.
+
+https://claude.ai/code/session_01AkrmDxxeHDSgFUecYSnsXa
+---
+ src/client/DetailPanel.tsx  |  56 +++++++-----
+ src/client/MessageGrid.tsx  |   6 +-
+ src/client/decodePayload.ts | 173 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 212 insertions(+), 23 deletions(-)
+ create mode 100644 src/client/decodePayload.ts
+
+diff --git a/src/client/DetailPanel.tsx b/src/client/DetailPanel.tsx
+index 8ccecb7..c07cf1c 100644
+--- a/src/client/DetailPanel.tsx
++++ b/src/client/DetailPanel.tsx
+@@ -1,23 +1,27 @@
+-import React from "react";
++import React, { useState, useEffect } from "react";
+ import { NatsMessage } from "./types";
++import { decodePayload, DecodeResult, formatLabel } from "./decodePayload";
+ 
+ interface Props {
+   message: NatsMessage | null;
+ }
+ 
+-function prettyJson(s: string): string | null {
+-  try {
+-    return JSON.stringify(JSON.parse(s), null, 2);
+-  } catch {
+-    return null;
+-  }
+-}
+-
+ function formatTime(ts: number): string {
+   return new Date(ts).toISOString().replace("T", " ").replace("Z", "");
+ }
+ 
+ export function DetailPanel({ message }: Props) {
++  const [decoded, setDecoded] = useState<DecodeResult | null>(null);
++
++  useEffect(() => {
++    if (!message) { setDecoded(null); return; }
++    let cancelled = false;
++    decodePayload(message.payload, message.encoding).then((r) => {
++      if (!cancelled) setDecoded(r);
++    });
++    return () => { cancelled = true; };
++  }, [message]);
++
+   if (!message) {
+     return (
+       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "#45475a", fontSize: 13 }}>
+@@ -26,10 +30,9 @@ export function DetailPanel({ message }: Props) {
+     );
+   }
+ 
+-  const isBinary = message.encoding === "base64";
+-  const pretty = !isBinary ? prettyJson(message.payload) : null;
++  const display = decoded?.display ?? message.payload;
++  const steps = decoded?.steps ?? (message.encoding === "base64" ? ["base64"] : []);
+   const headerEntries = Object.entries(message.headers);
+-  const payloadDisplay = isBinary ? message.payload : (pretty ?? message.payload);
+ 
+   return (
+     <div style={{ flex: 1, overflow: "auto", padding: 16, fontSize: 13, color: "#cdd6f4", display: "flex", flexDirection: "column", gap: 12 }}>
+@@ -59,25 +62,34 @@ export function DetailPanel({ message }: Props) {
+       <section style={{ flex: 1 }}>
+         <SectionTitle>
+           Payload
+-          {isBinary && (
+-            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#f38ba8", border: "1px solid #45475a" }}>
+-              binary · base64
+-            </span>
+-          )}
+-          {!isBinary && pretty && (
+-            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#a6e3a1", border: "1px solid #45475a" }}>
+-              JSON
++          {steps.length > 0 && (
++            <span style={{ display: "flex", alignItems: "center", gap: 3, marginLeft: 6 }}>
++              {steps.map((s, i) => (
++                <React.Fragment key={i}>
++                  {i > 0 && <span style={{ color: "#45475a", fontSize: 10 }}>→</span>}
++                  <span style={{
++                    padding: "1px 5px",
++                    fontSize: 10,
++                    borderRadius: 3,
++                    border: "1px solid #45475a",
++                    background: "#313244",
++                    color: s === "json" ? "#a6e3a1" : s === "hex" ? "#f38ba8" : "#89dceb",
++                  }}>
++                    {formatLabel(s)}
++                  </span>
++                </React.Fragment>
++              ))}
+             </span>
+           )}
+           <button
+             onClick={() => navigator.clipboard.writeText(message.payload)}
+             style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
+           >
+-            Copy
++            Copy raw
+           </button>
+         </SectionTitle>
+         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+-          {payloadDisplay || <span style={{ color: "#45475a" }}>(empty)</span>}
++          {display || <span style={{ color: "#45475a" }}>(empty)</span>}
+         </pre>
+       </section>
+     </div>
+diff --git a/src/client/MessageGrid.tsx b/src/client/MessageGrid.tsx
+index 0ec9e33..d904d2b 100644
+--- a/src/client/MessageGrid.tsx
++++ b/src/client/MessageGrid.tsx
+@@ -5,6 +5,10 @@ import "ag-grid-community/styles/ag-grid.css";
+ import "ag-grid-community/styles/ag-theme-alpine.css";
+ import { NatsMessage } from "./types";
+ 
++// Stable empty array — never reassigned, so AgGridReact never sees a changed
++// rowData prop and never re-initialises its row model on a parent re-render.
++const EMPTY_ROWS: NatsMessage[] = [];
++
+ interface Props {
+   messages: NatsMessage[];
+   tabId: string;
+@@ -168,7 +172,7 @@ export function MessageGrid({ messages, tabId, onSelect, selectedId }: Props) {
+       <div className="ag-theme-alpine-dark" style={{ flex: 1, overflow: "hidden" }}>
+         <AgGridReact<NatsMessage>
+           columnDefs={columnDefs}
+-          rowData={[]}
++          rowData={EMPTY_ROWS}
+           rowSelection="single"
+           getRowId={(p) => p.data.id}
+           onGridReady={onGridReady}
+diff --git a/src/client/decodePayload.ts b/src/client/decodePayload.ts
+new file mode 100644
+index 0000000..ab760c3
+--- /dev/null
++++ b/src/client/decodePayload.ts
+@@ -0,0 +1,173 @@
++// Tries to fully decode a payload by detecting and stripping base64 encoding,
++// zlib/gzip/deflate compression, and JSON formatting — in whatever combination
++// is present.  Returns null when the payload is already plain text or empty.
++
++export interface DecodeResult {
++  display: string;
++  steps: string[];
++}
++
++async function decompress(
++  data: Uint8Array,
++): Promise<{ data: Uint8Array; format: string } | null> {
++  if (typeof DecompressionStream === "undefined") return null;
++
++  // Magic-byte heuristic to order format attempts
++  const formats: CompressionFormat[] =
++    data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b
++      ? ["gzip", "deflate", "deflate-raw"]
++      : data.length >= 2 && data[0] === 0x78
++      ? ["deflate", "deflate-raw", "gzip"]
++      : ["deflate-raw", "deflate", "gzip"];
++
++  for (const fmt of formats) {
++    try {
++      const ds = new DecompressionStream(fmt);
++      const writer = ds.writable.getWriter();
++      const reader = ds.readable.getReader();
++      writer.write(data);
++      writer.close();
++      const chunks: Uint8Array[] = [];
++      for (;;) {
++        const { done, value } = await reader.read();
++        if (done) break;
++        if (value) chunks.push(value);
++      }
++      const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
++      let off = 0;
++      for (const c of chunks) {
++        out.set(c, off);
++        off += c.length;
++      }
++      return { data: out, format: fmt };
++    } catch {
++      // try next format
++    }
++  }
++  return null;
++}
++
++function toUtf8(data: Uint8Array): string | null {
++  try {
++    return new TextDecoder("utf-8", { fatal: true }).decode(data);
++  } catch {
++    return null;
++  }
++}
++
++function prettyJson(s: string): string | null {
++  try {
++    return JSON.stringify(JSON.parse(s), null, 2);
++  } catch {
++    return null;
++  }
++}
++
++function toHexDump(data: Uint8Array): string {
++  const lines: string[] = [];
++  for (let i = 0; i < data.length; i += 16) {
++    const row = data.slice(i, i + 16);
++    const hex = Array.from(row)
++      .map((b) => b.toString(16).padStart(2, "0"))
++      .join(" ");
++    const ascii = Array.from(row)
++      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
++      .join("");
++    lines.push(`${i.toString(16).padStart(6, "0")}  ${hex.padEnd(47)}  ${ascii}`);
++  }
++  return lines.join("\n");
++}
++
++// Returns null when the string isn't plausibly base64/base64url
++function fromBase64(s: string): Uint8Array | null {
++  const t = s.trim();
++  if (t.length < 16) return null;
++  const b64 = t.replace(/-/g, "+").replace(/_/g, "/");
++  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
++  if (!/^[A-Za-z0-9+/]+=*$/.test(padded)) return null;
++  try {
++    const bin = atob(padded);
++    const out = new Uint8Array(bin.length);
++    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
++    return out;
++  } catch {
++    return null;
++  }
++}
++
++// Recursively decode bytes: decompress → UTF-8 → JSON → inner base64
++async function decodeBytes(
++  bytes: Uint8Array,
++  steps: string[],
++  depth: number,
++): Promise<DecodeResult> {
++  if (depth > 4) {
++    return { display: toHexDump(bytes), steps: [...steps, "hex"] };
++  }
++
++  // Try decompression first (magic bytes guide format priority)
++  const dc = await decompress(bytes);
++  if (dc) {
++    return decodeBytes(dc.data, [...steps, dc.format], depth + 1);
++  }
++
++  // Try UTF-8 text
++  const text = toUtf8(bytes);
++  if (text !== null) {
++    const json = prettyJson(text);
++    if (json) return { display: json, steps: [...steps, "json"] };
++
++    // Check for a further base64 layer (double-encoded) but only once
++    if (depth < 2) {
++      const inner = fromBase64(text);
++      if (inner) {
++        const inner2 = await decodeBytes(inner, [...steps, "base64"], depth + 1);
++        // Only accept if we got past just hex (i.e. something meaningful decoded)
++        if (inner2.steps[inner2.steps.length - 1] !== "hex") return inner2;
++      }
++    }
++
++    return { display: text, steps };
++  }
++
++  // Couldn't decode as text — hex dump
++  return { display: toHexDump(bytes), steps: [...steps, "hex"] };
++}
++
++export async function decodePayload(
++  payload: string,
++  encoding: "text" | "base64",
++): Promise<DecodeResult | null> {
++  if (!payload) return null;
++
++  if (encoding === "base64") {
++    const bytes = fromBase64(payload);
++    if (!bytes) return null;
++    return decodeBytes(bytes, ["base64"], 0);
++  }
++
++  // Text path: fast-check JSON first
++  const json = prettyJson(payload);
++  if (json) return { display: json, steps: ["json"] };
++
++  // Check if the text itself is base64-encoded
++  const bytes = fromBase64(payload);
++  if (bytes) {
++    const result = await decodeBytes(bytes, ["base64"], 0);
++    // Skip if decoding produced nothing better than hex of seemingly random bytes —
++    // only surface it when we achieved a real transform (compression or text decode)
++    const last = result.steps[result.steps.length - 1];
++    if (last !== "hex") return result;
++    // For long strings that really look like base64, show the hex anyway
++    if (payload.trim().length >= 64) return result;
++  }
++
++  return null; // already plain text, shown as-is by the caller
++}
++
++// Human-readable label for a compression format string
++export function formatLabel(step: string): string {
++  if (step === "deflate") return "zlib";
++  if (step === "deflate-raw") return "deflate";
++  return step;
++}
+-- 
+2.43.0
+
