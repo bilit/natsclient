@@ -1,0 +1,306 @@
+From c7d1dc3c9c8ffa2378e12aa61d2984311f63a7fe Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 12 May 2026 21:51:52 +0000
+Subject: [PATCH] Fix row filtering, remove auto-scroll, handle binary payloads
+ faithfully
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Filtering bug: isExternalFilterPresent always returning true caused AG Grid
+to run doesExternalFilterPass during applyTransaction before checkedSubjectsRef
+was populated, filtering every row. Fix: drop external filter entirely; restore
+visibleMessages (useMemo) in App and pass the pre-filtered array to MessageGrid.
+applyTransaction is kept for pure appends, detected via O(1) object-identity
+check on the tail item — structural changes (subject toggle, clear, tab switch)
+fall back to a full setGridOption rowData reset.
+
+Auto-scroll: removed ensureIndexVisible; grid stays at current scroll position
+as new messages arrive.
+
+Binary payloads: server now does a UTF-8 round-trip check (Buffer → utf8 string →
+back to Buffer → equals) and sends encoding: 'text' | 'base64'. DetailPanel
+shows a 'binary · base64' badge and renders the base64 string verbatim for
+binary messages; JSON badge and pretty-print for valid JSON text.
+
+https://claude.ai/code/session_01AkrmDxxeHDSgFUecYSnsXa
+---
+ src/client/App.tsx         | 13 ++++++---
+ src/client/DetailPanel.tsx | 18 ++++++++++--
+ src/client/MessageGrid.tsx | 60 +++++++++++++++++---------------------
+ src/client/types.ts        |  3 +-
+ src/server/natsProxy.ts    | 12 ++++----
+ 5 files changed, 59 insertions(+), 47 deletions(-)
+
+diff --git a/src/client/App.tsx b/src/client/App.tsx
+index 4b25079..8342a41 100644
+--- a/src/client/App.tsx
++++ b/src/client/App.tsx
+@@ -1,4 +1,4 @@
+-import React, { useState, useEffect, useRef, useCallback } from "react";
++import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+ import { TabBar } from "./TabBar";
+ import { SubjectPanel } from "./SubjectPanel";
+ import { MessageGrid } from "./MessageGrid";
+@@ -71,6 +71,7 @@ export function App() {
+         subject: evt.subject,
+         replyTo: evt.replyTo,
+         payload: evt.payload,
++        encoding: evt.encoding,
+         headers: evt.headers,
+         timestamp: evt.timestamp,
+         size: evt.size,
+@@ -163,6 +164,11 @@ export function App() {
+   }
+ 
+   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
++  const visibleMessages = useMemo(
++    () => activeTab?.messages.filter((m) => activeTab.checkedSubjects.has(m.subject)) ?? [],
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [activeTab?.messages, activeTab?.checkedSubjects],
++  );
+ 
+   // Start with one empty tab on mount
+   useEffect(() => {
+@@ -183,7 +189,7 @@ export function App() {
+ 
+           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #313244", fontSize: 12, color: "#6c7086" }}>
+-              <span>{activeTab.messages.length} messages</span>
++              <span>{visibleMessages.length} messages</span>
+               <div style={{ flex: 1 }} />
+               <button onClick={clearMessages} style={actionBtn}>Clear</button>
+               <button onClick={togglePause} style={{ ...actionBtn, color: paused ? "#a6e3a1" : "#cdd6f4" }}>
+@@ -192,8 +198,7 @@ export function App() {
+             </div>
+             <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+               <MessageGrid
+-                messages={activeTab.messages}
+-                checkedSubjects={activeTab.checkedSubjects}
++                messages={visibleMessages}
+                 tabId={activeTab.id}
+                 onSelect={setSelectedMsg}
+                 selectedId={selectedMsg?.id ?? null}
+diff --git a/src/client/DetailPanel.tsx b/src/client/DetailPanel.tsx
+index fcd530c..8ccecb7 100644
+--- a/src/client/DetailPanel.tsx
++++ b/src/client/DetailPanel.tsx
+@@ -26,8 +26,10 @@ export function DetailPanel({ message }: Props) {
+     );
+   }
+ 
+-  const pretty = prettyJson(message.payload);
++  const isBinary = message.encoding === "base64";
++  const pretty = !isBinary ? prettyJson(message.payload) : null;
+   const headerEntries = Object.entries(message.headers);
++  const payloadDisplay = isBinary ? message.payload : (pretty ?? message.payload);
+ 
+   return (
+     <div style={{ flex: 1, overflow: "auto", padding: 16, fontSize: 13, color: "#cdd6f4", display: "flex", flexDirection: "column", gap: 12 }}>
+@@ -57,15 +59,25 @@ export function DetailPanel({ message }: Props) {
+       <section style={{ flex: 1 }}>
+         <SectionTitle>
+           Payload
++          {isBinary && (
++            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#f38ba8", border: "1px solid #45475a" }}>
++              binary · base64
++            </span>
++          )}
++          {!isBinary && pretty && (
++            <span style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10, borderRadius: 3, background: "#313244", color: "#a6e3a1", border: "1px solid #45475a" }}>
++              JSON
++            </span>
++          )}
+           <button
+             onClick={() => navigator.clipboard.writeText(message.payload)}
+-            style={{ marginLeft: 8, padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
++            style={{ marginLeft: "auto", padding: "1px 8px", fontSize: 11, borderRadius: 4, border: "1px solid #45475a", background: "#313244", color: "#cdd6f4", cursor: "pointer" }}
+           >
+             Copy
+           </button>
+         </SectionTitle>
+         <pre style={{ margin: 0, padding: 10, borderRadius: 4, background: "#11111b", overflowX: "auto", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+-          {(pretty ?? message.payload) || <span style={{ color: "#45475a" }}>(empty)</span>}
++          {payloadDisplay || <span style={{ color: "#45475a" }}>(empty)</span>}
+         </pre>
+       </section>
+     </div>
+diff --git a/src/client/MessageGrid.tsx b/src/client/MessageGrid.tsx
+index 79f6b09..0ec9e33 100644
+--- a/src/client/MessageGrid.tsx
++++ b/src/client/MessageGrid.tsx
+@@ -1,13 +1,12 @@
+ import React, { useRef, useEffect, useCallback, useState } from "react";
+ import { AgGridReact } from "ag-grid-react";
+-import { ColDef, GridReadyEvent, GridApi, IRowNode } from "ag-grid-community";
++import { ColDef, GridReadyEvent, GridApi } from "ag-grid-community";
+ import "ag-grid-community/styles/ag-grid.css";
+ import "ag-grid-community/styles/ag-theme-alpine.css";
+ import { NatsMessage } from "./types";
+ 
+ interface Props {
+   messages: NatsMessage[];
+-  checkedSubjects: Set<string>;
+   tabId: string;
+   onSelect: (msg: NatsMessage) => void;
+   selectedId: string | null;
+@@ -82,29 +81,29 @@ const columnDefs: ColDef<NatsMessage>[] = [
+   },
+ ];
+ 
+-export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, selectedId }: Props) {
++export function MessageGrid({ messages, tabId, onSelect, selectedId }: Props) {
+   const gridApi = useRef<GridApi<NatsMessage> | null>(null);
+   const [quickFilter, setQuickFilter] = useState("");
+ 
+-  // Refs so callbacks always read latest values without needing to be recreated
+-  const checkedSubjectsRef = useRef(checkedSubjects);
+-  checkedSubjectsRef.current = checkedSubjects;
++  // Tracks what the grid was last told about
++  const gridStateRef = useRef({ tabId: "", messageCount: 0, lastItem: null as NatsMessage | null });
++
+   const messagesRef = useRef(messages);
+   messagesRef.current = messages;
+   const tabIdRef = useRef(tabId);
+   tabIdRef.current = tabId;
+ 
+-  // Tracks what state the grid has been told about
+-  const gridStateRef = useRef({ tabId: "", messageCount: 0 });
+-
+   const onGridReady = useCallback((e: GridReadyEvent<NatsMessage>) => {
+     gridApi.current = e.api;
+     const msgs = messagesRef.current;
+     e.api.setGridOption("rowData", msgs);
+-    gridStateRef.current = { tabId: tabIdRef.current, messageCount: msgs.length };
++    gridStateRef.current = {
++      tabId: tabIdRef.current,
++      messageCount: msgs.length,
++      lastItem: msgs[msgs.length - 1] ?? null,
++    };
+   }, []);
+ 
+-  // Incremental updates via applyTransaction; full reset only on tab switch or clear
+   useEffect(() => {
+     const api = gridApi.current;
+     if (!api) return;
+@@ -112,40 +111,37 @@ export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, select
+     const state = gridStateRef.current;
+     const currLen = messages.length;
+ 
++    // Tab switched — full reset
+     if (state.tabId !== tabId) {
+       api.setGridOption("rowData", messages);
+-      gridStateRef.current = { tabId, messageCount: currLen };
++      gridStateRef.current = { tabId, messageCount: currLen, lastItem: messages[currLen - 1] ?? null };
+       return;
+     }
+ 
+     const prevLen = state.messageCount;
+ 
+-    if (currLen === 0 && prevLen > 0) {
++    if (currLen === prevLen) return;
++
++    if (currLen === 0) {
+       api.setGridOption("rowData", []);
+     } else if (currLen > prevLen) {
+-      api.applyTransaction({ add: messages.slice(prevLen) });
+-      const lastVisible = api.getDisplayedRowCount() - 1;
+-      if (lastVisible >= 0) api.ensureIndexVisible(lastVisible, "bottom");
+-    } else if (currLen < prevLen && currLen > 0) {
+-      // Shouldn't happen in normal usage; reset defensively
++      // Only use applyTransaction when the array grew by pure appends:
++      // check that the item previously at the tail is still at the same position.
++      const isPureAppend = prevLen === 0 || messages[prevLen - 1] === state.lastItem;
++      if (isPureAppend) {
++        api.applyTransaction({ add: messages.slice(prevLen) });
++      } else {
++        // Subject was re-checked — existing filtered items reappeared
++        api.setGridOption("rowData", messages);
++      }
++    } else {
++      // Array shrank (subject unchecked or clear) — full reset
+       api.setGridOption("rowData", messages);
+     }
+ 
+-    gridStateRef.current = { ...state, messageCount: currLen };
++    gridStateRef.current = { tabId, messageCount: currLen, lastItem: messages[currLen - 1] ?? null };
+   }, [messages, tabId]);
+ 
+-  // Re-evaluate external filter when subject checkboxes change
+-  useEffect(() => {
+-    gridApi.current?.onFilterChanged();
+-  }, [checkedSubjects]);
+-
+-  const isExternalFilterPresent = useCallback(() => true, []);
+-
+-  const doesExternalFilterPass = useCallback((node: IRowNode<NatsMessage>) => {
+-    if (!node.data) return true;
+-    return checkedSubjectsRef.current.has(node.data.subject);
+-  }, []);
+-
+   return (
+     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+       <div style={{ padding: "4px 8px", borderBottom: "1px solid #313244", background: "#1e1e2e", flexShrink: 0 }}>
+@@ -180,8 +176,6 @@ export function MessageGrid({ messages, checkedSubjects, tabId, onSelect, select
+           rowStyle={{ cursor: "pointer" }}
+           suppressCellFocus
+           animateRows={false}
+-          isExternalFilterPresent={isExternalFilterPresent}
+-          doesExternalFilterPass={doesExternalFilterPass}
+         />
+       </div>
+     </div>
+diff --git a/src/client/types.ts b/src/client/types.ts
+index aec2000..2eff896 100644
+--- a/src/client/types.ts
++++ b/src/client/types.ts
+@@ -3,6 +3,7 @@ export interface NatsMessage {
+   subject: string;
+   replyTo: string | null;
+   payload: string;
++  encoding: "text" | "base64";
+   headers: Record<string, string>;
+   timestamp: number;
+   size: number;
+@@ -10,7 +11,7 @@ export interface NatsMessage {
+ 
+ export type ServerToClient =
+   | { type: "connected"; serverInfo: Record<string, unknown> }
+-  | { type: "message"; id: string; subject: string; replyTo: string | null; payload: string; headers: Record<string, string>; timestamp: number; size: number }
++  | { type: "message"; id: string; subject: string; replyTo: string | null; payload: string; encoding: "text" | "base64"; headers: Record<string, string>; timestamp: number; size: number }
+   | { type: "subjects"; subjects: string[] }
+   | { type: "published"; subject: string }
+   | { type: "error"; message: string };
+diff --git a/src/server/natsProxy.ts b/src/server/natsProxy.ts
+index 151fbda..e478951 100644
+--- a/src/server/natsProxy.ts
++++ b/src/server/natsProxy.ts
+@@ -73,12 +73,11 @@ export class NatsProxy {
+ 
+         const subject = msg.subject;
+         const payloadBytes = msg.data;
+-        let payload: string;
+-        try {
+-          payload = sc.decode(payloadBytes);
+-        } catch {
+-          payload = Buffer.from(payloadBytes).toString("base64");
+-        }
++        const bufData = Buffer.from(payloadBytes);
++        const asUtf8 = bufData.toString("utf8");
++        const isText = Buffer.from(asUtf8, "utf8").equals(bufData);
++        const payload = isText ? asUtf8 : bufData.toString("base64");
++        const encoding = isText ? "text" : "base64";
+ 
+         if (!this.seenSubjects.has(subject)) {
+           this.seenSubjects.add(subject);
+@@ -91,6 +90,7 @@ export class NatsProxy {
+           subject,
+           replyTo: msg.reply ?? null,
+           payload,
++          encoding,
+           headers: headersToRecord(msg.headers),
+           timestamp: Date.now(),
+           size: payloadBytes.length,
+-- 
+2.43.0
+
