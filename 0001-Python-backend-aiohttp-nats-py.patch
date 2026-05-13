@@ -1,0 +1,705 @@
+From 0f5a1ea509aeb1057dd96c1b53869572b337f40a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 13 May 2026 05:41:31 +0000
+Subject: [PATCH 1/2] Add Python backend (aiohttp + nats-py) with identical
+ wire protocol
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Implements server_py/ as a drop-in Python alternative to the Node.js backend:
+- Same WebSocket JSON protocol (connect/publish/disconnect ↔ connected/message/subjects/published/error)
+- UTF-8 round-trip detection for binary payloads, base64 fallback
+- Discovery via NATS '>' wildcard subscription with subject deduplication
+- aiohttp WebSocket server + static file serving + SPA fallback
+- argparse CLI: --server/-s, --port/-p, --no-open
+- Run with: python -m server_py [--server nats://localhost:4222]
+
+https://claude.ai/code/session_01AkrmDxxeHDSgFUecYSnsXa
+---
+ requirements.txt                              |   2 +
+ server_py/__init__.py                         |   0
+ server_py/__main__.py                         |  58 +++++++++
+ .../__pycache__/__init__.cpython-311.pyc      | Bin 0 -> 152 bytes
+ .../__pycache__/__main__.cpython-311.pyc      | Bin 0 -> 3894 bytes
+ .../__pycache__/http_server.cpython-311.pyc   | Bin 0 -> 3382 bytes
+ .../__pycache__/nats_proxy.cpython-311.pyc    | Bin 0 -> 7352 bytes
+ server_py/http_server.py                      |  59 +++++++++
+ server_py/nats_proxy.py                       | 113 ++++++++++++++++++
+ 9 files changed, 232 insertions(+)
+ create mode 100644 requirements.txt
+ create mode 100644 server_py/__init__.py
+ create mode 100644 server_py/__main__.py
+ create mode 100644 server_py/__pycache__/__init__.cpython-311.pyc
+ create mode 100644 server_py/__pycache__/__main__.cpython-311.pyc
+ create mode 100644 server_py/__pycache__/http_server.cpython-311.pyc
+ create mode 100644 server_py/__pycache__/nats_proxy.cpython-311.pyc
+ create mode 100644 server_py/http_server.py
+ create mode 100644 server_py/nats_proxy.py
+
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..2192e73
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,2 @@
++nats-py>=2.6.0
++aiohttp>=3.9.0
+diff --git a/server_py/__init__.py b/server_py/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/server_py/__main__.py b/server_py/__main__.py
+new file mode 100644
+index 0000000..dfb0c0c
+--- /dev/null
++++ b/server_py/__main__.py
+@@ -0,0 +1,58 @@
++import argparse
++import asyncio
++import socket
++import webbrowser
++from pathlib import Path
++
++from aiohttp import web
++
++from .http_server import create_app
++
++
++def find_free_port(preferred: int | None) -> int:
++    if preferred is not None:
++        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
++            try:
++                s.bind(("", preferred))
++                return preferred
++            except OSError:
++                pass
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
++        s.bind(("", 0))
++        return s.getsockname()[1]
++
++
++async def run(args: argparse.Namespace) -> None:
++    static_dir = Path(__file__).parent.parent / "dist-client"
++    port = find_free_port(args.port)
++    app = create_app(static_dir, args.server)
++
++    runner = web.AppRunner(app)
++    await runner.setup()
++    site = web.TCPSite(runner, "localhost", port)
++    await site.start()
++
++    url = f"http://localhost:{port}"
++    print(f"NATS Client running at {url}")
++
++    if not args.no_open:
++        webbrowser.open(url)
++
++    await asyncio.Event().wait()
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Web-based NATS client")
++    parser.add_argument("-s", "--server", metavar="URL", help="NATS server URL to pre-connect on launch")
++    parser.add_argument("-p", "--port", type=int, metavar="PORT", help="HTTP port (default: auto)")
++    parser.add_argument("--no-open", action="store_true", help="Do not auto-open browser")
++    args = parser.parse_args()
++
++    try:
++        asyncio.run(run(args))
++    except KeyboardInterrupt:
++        pass
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/server_py/__pycache__/__init__.cpython-311.pyc b/server_py/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000000000000000000000000000000000000..211ec188c9d2e9d62baf8a499524a7e23912166a
+GIT binary patch
+literal 152
+zcmZ3^%ge<81T*+pvOx4>5CH>>P{wCAAY(d13PUi1CZpd<h9V{)|1(JPm$rUJer~FM
+zX>n?ieqLfpadJ*(YF>#xkXx2o6kkxOA0MBYmst`YuUAm{i^C>2KczG$)vkyYs25~<
+UF+Y&_z|6?V_<;dN6fpzE02?hKvj6}9
+
+literal 0
+HcmV?d00001
+
+diff --git a/server_py/__pycache__/__main__.cpython-311.pyc b/server_py/__pycache__/__main__.cpython-311.pyc
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6c1bb1879c58c0212fc5a5b38d310c3dee9a1c2
+GIT binary patch
+literal 3894
+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
+Z+nYFA9sA(qM<=UZZm|gO0I_!r{{z$HTv`AC
+
+literal 0
+HcmV?d00001
+
+diff --git a/server_py/__pycache__/http_server.cpython-311.pyc b/server_py/__pycache__/http_server.cpython-311.pyc
+new file mode 100644
+index 0000000000000000000000000000000000000000..1166a405d1a4673929b8f9389a57acd17bceac82
+GIT binary patch
+literal 3382
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/server_py/__pycache__/nats_proxy.cpython-311.pyc b/server_py/__pycache__/nats_proxy.cpython-311.pyc
+new file mode 100644
+index 0000000000000000000000000000000000000000..c538c1214811caf8a80b79fba2f51c0db153d703
+GIT binary patch
+literal 7352
+zcmb^$ZEO?g`90sA?X#W4v4eqpKtj?a4v?@mgfvC0ft2vEMlGRqL~T9CcL4{-PVX*!
+zq|QWFw51)=QpOazrjjSIE{IO*k4<CJra`+&`!nerofPY&NJvwqPTCJwv=ZXip65NE
+zKN1`Gu{W=ud*AookLP{v`OfdEs$2xhch%gayM~Z|W5+67uJJ&G#v&1k$i&E)`DDfz
+z+P96_=#w2|;c1I;Q~Vgum~-r7c8QnmFwVvtQ_e9bLu_Q2h};z-@}JrWxeY(Fj0qw$
+zN`m(PV0R?Q7*!`vzw%P((2<u89X~oU3<I^VOXH)7$T>+pAt}>|xFSVzYw1JCbsn6D
+z#v+jj;s>~SMg9s0xY;F6WJPX*6CKd!#aht`BLe(f61<bR3ES5Eej+#PAb>T@cZ%*S
+z{Fp=Zi5^(zgl82z1+iMP=k}|CzDwi)d%q!!gjMAgIdSolVY{HnNI=6bOX`dqABp5I
+z3!~U(;rHMafJKsIk|YEzvxo$GOi3@lRt3bY@+mZKTOC|ueJ~*ZD7nRq1bKrET~GkT
+zBSv*dj4F}Dc}cz$Qf9^tR*_T~R3s^m{YfdJDnXmUDN<}g##0nLw7L1w?w+%WDXC{h
+zk>s8@+%FP~N^!LZy0BMh`Vt)sP2;V*r!N`KP$(LYs-e)VFHenbYpfdg?E-L_Wc-`v
+zxvS31vwifjZO1&PI~&$Ici!SZ<7r!SHb8v<vx&jZ$gvU%I$`uZ_&s<8l=>MtP8gu$
+z`y>TJ8%rsr-UIr)!=56G>`yrc)=cJUoyya>c#qQ6z}$>#FT58)04BJ3GQo)K70;Ya
+ztfFlW+N?lSi!ourByX*P?`=!6pYfjp58OsRprshE_em&!h6;jd6~Hz>F507{bcbms
+zO6EAA0#au~5gkcRbS~LGh5O#l-?{iyq(-U;<H8oDG$>tz+}28pY0^gIo;kiE9)jpf
+zG9MGso#a0zpKzk*@i?7^?={E&n8$O>)&=GQxyYU-7nor6h`~rQ-ZzrJ5_FJAzl7g|
+zaR9$!a_qsRptrHW2hD#30)kXZAkp@C^boBeJ7VyXEGOh!AVTV;X~}R*Ns1CaBY{lu
+zAZ2k8Bu<rsHaP$Y$X)=ZfL)erp=~(n>QH2SwzVKOkwiQWa@oB<mWYI7%7Jcc(iU9)
+zeE<)?CSRj4`2vew*Sb<?{@Qvc{O9(+v};X+P}9DHy6>RosaRz{>=A)qz95fM!X1G|
+zo^Tc9N@Rfh*{2{6HzFg-vw@MplcUYKYef_B=144|NTQ6oH^|71@VLd8#KEtbqm5wB
+zLgKVNhB*0I4X{)h0I;4q+Q12|X%uSOcT)GA)I1d{B@BG5ZLo{n0>JRVN2D4r8lOlQ
+zLhcTd2$SmZy~})k6yBP5-E=q{jY(p&ny@a6%~{((GrjID8|B)Opv!Pk%}hVFjIwU<
+zk(d;g4dJDW5ouZlIvE^lUc-?)RrcU4#~DcttEx=NW_Ux28kW_9mJiw~A>}%lTXYW&
+z@uy6vppg8i84Kk>85Q$v?FI_t2Fl;ydsyVG_WdI9K_XqfU9aA*Im^_H(*wGE)!DM*
+zY)Ly?b!V&QY|V0vaESRNnkD#L9x|U#fObZBjlnsOfp(V=V%C~kmfpyC{h6&TnflhO
+zgWFd94FT{if-K>-R0i`ySC4$>B6STndYAfBZ+(6u?eEw9{hI&4orCj3mS~;3Tc<T0
+zhMM*b>%L*lQ>Mb)RbR)7uOsaX>b{`nsaPMb)oj6Qh3MrhXq|ON8+b!I@ft#?r^j-Q
+zrZ=^wH`Bhibl+Q==c(#LC|MSdfrf%ocCTvi*+UHZl5rgxV83*?9oox&xtE8w;mCOb
+zhGRN>DV7L}hU2Uh7A0AU<Q)sx0GZ}J_&rDhN0@pwNhV>yESH;;B!#lOp**d!5J=Ki
+z-Vlpisb-$zicd}z>F~ngU~0J}I}P68<IF7sTE7C;_9P=Zo~+`)02UctFo3(}_=<Zn
+zqLZ4wCo0d!nm!??RI5f3s-<Fby7Uo0qfYGZ2bH=9NMQ)mGvl$SayGB6<Zc+A^}b>b
+zH&0MaHP9U7sb(=1id~9F5+WF~++w*C)>ujf*ULQ!=mDG<2IYg6jVcwYQ*ugWFANqd
+zmE3NqYm{ezQE~>%U30Zxb2sEA;7*U$bPQ_RcU<=!*F0rv#^akmoVD@7D3kHmFCMsd
+zAk~rfcj^8vDz(=;SA9EHd^=M6mWS?i-08V{QuFOd`;O_pW16Q-wT?b_=gboY-IRVy
+zh)1aqThQ7Eg!q+zz6t<q)2mR^z7x9dgywmwYKiVB6<xHRw+FWz<jEJj>);FQ7d0&h
+z``9n~cxab6J}9bGJY8kQ^WA<BuOe|R&-9P;_TpY(^&*7;tj;pzG>LPTPe$VxK*KC>
+zT3#^U9iXS@`>CRRtoeleA5PDoVET-sM0Uacz}{8xFx)e7&~-{gj*d%|t4({#i*h&`
+zmz!aVf*LHx!0phStt(i?g0V){R{jMb&%?TVo96Dy+Ssa1nLxcB2(AY9t_1d`1N-#A
+zKFwRcK3wxRf-R`pQ~()o-2w-SyJ{1#!TlZW^Fz94d&ZQJ?bi0!&o0KV#nXXyJ<zUs
+z%hxCFy}1F+-#q+f-Ne(Zxwk9m^Zb1KPIBAT&;E(&XYaYT4|b7zU9Q1>?7cn)V0n(a
+z2<r-wSdmG92njrQp2kHsh>IAAVqmUW%5$K|CYjH;(j-A~)B*8PK31a+xP4?}5P%<>
+z`m+0hA1q(CnEU4#;76tc2FyBRW2<PE*3C>Z=O}J6pR|d#Ic|=PJBp*DpD^(kOU*^`
+z+X)*Q4~D32i$V}NqS2)#x$dkAxU=hUhg8NKS1hAIg?uJqj)$nxp5*1DNxppKSSpc2
+z<jvkU;D&RKIj4#NM6M*AD!PifQu^&=XVNM1g%nG?THS2TgpkWwif_`MbnJ)MSN8&*
+z=<CulCnSaUU6c4#X*tix&lmSom|fUVl0xa;5aYU1MG<vjfoM+(XP#*6E3S4H-$-pK
+z>^q489xbJGEX6A+z+HXTOmtY1EVwRqwZj@CL=6_&lX+T~?kWni5W|)3t?n$WThBqF
+zYiS*YiscMbc@W;ZN91Q=3kYqci>kqgl}I#d*vG?))YmH`vm4Gr4vEG?GDfE|Mq<&g
+zLHdG%870}GBK18Chb&FUE}cwJCjz2h^fjXKGdX`njY9OShNq?>9~GUIf&sY?53!39
+zx+HQhc3h{zu^H(l47v^9Yw;+)8KUp$n0x>y3FCderXOSO%tuveN-<nfB^rkV;t|Q<
+zz%x?iCYVhzGb1oIEQ+QZ#Ldh^MT1A!Yw#3ngN?>jpamdlurVnfbQ|oHa)#n4Bj1{y
+z(LqGOEr&0Ja(=Xl0&~t_&YMTkEC9;6=`bP8g}nAeJOo?Lb`|W-`uMJp6)@)x!#>Ja
+zV7RO>t-figbABjmb5^xwHa9H3bM2kfzVzmu`sSSrT*kk7@r7$I+_;eTcj*3(<=z#4
+zkLK^mbnaT7xbee<;f3L^>f5xswk%IJH9q{#PBwM?-lh4U%Mx2vTLG-qH|zCX%f0FP
+zJ$n6~)%txa_51EP()BOu^)D_sG7YT@PW;RAunI#FC+XaI^PTzQnfA{4;Y>|E?sSyN
+zG<K{u?p|r!oo?*W8+*VE)*eNd3gCxB3xf-9uLYm`eDIHII=EjC?$=t5q-s;&yIGg2
+z`$y~D@V)lGw=WFe82s?q!m;~-t=G@t#(^86zU_Nj4OXzFy0>-J+p*&9Sazhndvxy}
+z&ASKe^Wx;S$>pxQ`|bv{mLEV(2VT|#FKga1^}d;4$!uv^3vB(QZK>;{T}!*tfet;;
+zk!jeGY1p>(yw<R5nZr(F8^E=u=HJ%c-1?h_n+?lqy5+faQ?K6CySAm_#?VK?l92Vg
+zFf0Y|4RQHvzC{4ts;34DDwV4PgAQ`fF>sJ$zhD`FkC+3HE4M|)<!9h^kTo3}q2TSH
+z@`Q{9GM@Z80GfmPQO?uZ1p~A7l{xMZE<np|ahT<_Q%9U@5diy2;4nj;3En)i+Sa$y
+z*7vz`=e*X|mu@?(w;k5Dt*=GdUz&%Zf>o0J&3m~Y05)b2TI$ypa=OZnVvAosuw1Vb
+zH)=rCf*W$2kUho#ZIoD^ujyrSGK#ceH}g@3fXTnmq>_l65mb))sL*mLb~F2e$*<X(
+zV(P=X7|wbdfazjpZJbaGvU|P%`uEXW>;W#mes(p`xf1AHu1g2H^+31gtys~cMDeQX
+zdH9u?f2f6?V1kUtJ3j>a0@4Mwm@PmXd1Y5G`GafF#@=HXfI*J_XMp}=!^~dM8=K7L
+z#?*g2JSBxfhAR}BN{BNtY<ohXw`amJ^Noxa&Q!Kt&@wnN8c}6*q~&%5$bx1XkeHty
+z*<7|;0NGdhFM!MWKOhO;4GEqS;Hl$7Ov;}n_*||tpJm`Kfyb~7VQSQTehxYg`*-W^
+zM*jKS-Lrq+rkyyI9z11^YU2}TqYMmqc<|#(L1PC$3<qq0Cm5cuO>tQQ55x~16@f_z
+zqygj#9bx5CJQ7V%^CrKHgn1Q!VTYtM+E0vpWONe@cQ~3jtE$u87o>6Xi%~L;;{^2D
+zDAzr5?l(Ww0eJ$(Fziu&4FI@+VKSupGX2Yts>}2*L)@3?Us0o3BPI2|HRnF-1@2<H
+aGu&>iv}Wxh!@z~h!*A&Lw-w$}-2VrRAB6t^
+
+literal 0
+HcmV?d00001
+
+diff --git a/server_py/http_server.py b/server_py/http_server.py
+new file mode 100644
+index 0000000..32a70c9
+--- /dev/null
++++ b/server_py/http_server.py
+@@ -0,0 +1,59 @@
++import json
++from pathlib import Path
++
++from aiohttp import web
++
++from .nats_proxy import NatsProxy
++
++
++async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
++    ws = web.WebSocketResponse()
++    await ws.prepare(request)
++
++    default_server: str | None = request.app["default_server"]
++    proxy = NatsProxy(ws)
++
++    if default_server:
++        await proxy.connect(default_server)
++
++    async for msg in ws:
++        if msg.type == web.WSMsgType.TEXT:
++            try:
++                data = json.loads(msg.data)
++            except Exception:
++                continue
++            msg_type = data.get("type")
++            if msg_type == "connect":
++                await proxy.connect(data["url"])
++            elif msg_type == "publish":
++                await proxy.publish(
++                    data["subject"],
++                    data.get("payload", ""),
++                    data.get("headers"),
++                )
++            elif msg_type == "disconnect":
++                await proxy.disconnect()
++        elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
++            break
++
++    await proxy.disconnect()
++    return ws
++
++
++async def spa_handler(request: web.Request) -> web.FileResponse:
++    static_dir: Path = request.app["static_dir"]
++    return web.FileResponse(static_dir / "index.html")
++
++
++def create_app(static_dir: Path, default_server: str | None = None) -> web.Application:
++    app = web.Application()
++    app["static_dir"] = static_dir
++    app["default_server"] = default_server
++
++    app.router.add_get("/ws", websocket_handler)
++    assets_dir = static_dir / "assets"
++    if assets_dir.exists():
++        app.router.add_static("/assets", assets_dir)
++    app.router.add_route("GET", "/{path_info:.*}", spa_handler)
++
++    return app
+diff --git a/server_py/nats_proxy.py b/server_py/nats_proxy.py
+new file mode 100644
+index 0000000..85d7d0b
+--- /dev/null
++++ b/server_py/nats_proxy.py
+@@ -0,0 +1,113 @@
++import asyncio
++import base64
++import uuid
++import time
++from typing import TYPE_CHECKING
++
++import nats
++
++if TYPE_CHECKING:
++    from aiohttp.web import WebSocketResponse
++
++
++class NatsProxy:
++    def __init__(self, ws: "WebSocketResponse") -> None:
++        self._ws = ws
++        self._nc: nats.aio.client.Client | None = None
++        self._discovery_sub = None
++        self._seen_subjects: set[str] = set()
++
++    async def connect(self, url: str) -> None:
++        await self.disconnect()
++        self._seen_subjects.clear()
++
++        async def error_cb(e: Exception) -> None:
++            await self._send({"type": "error", "message": str(e)})
++
++        async def closed_cb() -> None:
++            await self._send({"type": "error", "message": "NATS connection closed"})
++
++        try:
++            self._nc = await nats.connect(
++                url,
++                error_cb=error_cb,
++                closed_cb=closed_cb,
++            )
++            info = getattr(self._nc, "_server_info", {}) or {}
++            await self._send({"type": "connected", "serverInfo": info})
++            await self._start_discovery()
++        except Exception as e:
++            await self._send({"type": "error", "message": f"Failed to connect to {url}: {e}"})
++
++    async def publish(self, subject: str, payload: str, headers: dict[str, str] | None = None) -> None:
++        if self._nc is None:
++            await self._send({"type": "error", "message": "Not connected"})
++            return
++        try:
++            data = payload.encode("utf-8")
++            await self._nc.publish(subject, data, headers=headers or None)
++            await self._send({"type": "published", "subject": subject})
++        except Exception as e:
++            await self._send({"type": "error", "message": f"Publish failed: {e}"})
++
++    async def disconnect(self) -> None:
++        if self._discovery_sub is not None:
++            try:
++                await self._discovery_sub.unsubscribe()
++            except Exception:
++                pass
++            self._discovery_sub = None
++        if self._nc is not None:
++            try:
++                await self._nc.drain()
++            except Exception:
++                pass
++            self._nc = None
++
++    async def _start_discovery(self) -> None:
++        if self._nc is None:
++            return
++
++        async def on_msg(msg) -> None:
++            data: bytes = msg.data
++            try:
++                text = data.decode("utf-8")
++                if text.encode("utf-8") == data:
++                    payload, encoding = text, "text"
++                else:
++                    raise ValueError
++            except (UnicodeDecodeError, ValueError):
++                payload = base64.b64encode(data).decode("ascii")
++                encoding = "base64"
++
++            raw_headers: dict | None = msg.headers
++            headers: dict[str, str] = {}
++            if raw_headers:
++                for k, v in raw_headers.items():
++                    headers[k] = v[0] if isinstance(v, list) else str(v)
++
++            subject = msg.subject
++            if subject not in self._seen_subjects:
++                self._seen_subjects.add(subject)
++                await self._send({"type": "subjects", "subjects": [subject]})
++
++            await self._send({
++                "type": "message",
++                "id": str(uuid.uuid4()),
++                "subject": subject,
++                "replyTo": msg.reply or None,
++                "payload": payload,
++                "encoding": encoding,
++                "headers": headers,
++                "timestamp": int(time.time() * 1000),
++                "size": len(data),
++            })
++
++        self._discovery_sub = await self._nc.subscribe(">", cb=on_msg)
++
++    async def _send(self, data: dict) -> None:
++        try:
++            if not self._ws.closed:
++                await self._ws.send_json(data)
++        except Exception:
++            pass
+-- 
+2.43.0
+
+
+From 21c0d48e0a07c37c2a4c1101b79fbaca772d3bab Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 13 May 2026 05:41:41 +0000
+Subject: [PATCH 2/2] Add __pycache__ to .gitignore, remove cached bytecode
+
+https://claude.ai/code/session_01AkrmDxxeHDSgFUecYSnsXa
+---
+ .gitignore                                       |   2 ++
+ server_py/__pycache__/__init__.cpython-311.pyc   | Bin 152 -> 0 bytes
+ server_py/__pycache__/__main__.cpython-311.pyc   | Bin 3894 -> 0 bytes
+ .../__pycache__/http_server.cpython-311.pyc      | Bin 3382 -> 0 bytes
+ server_py/__pycache__/nats_proxy.cpython-311.pyc | Bin 7352 -> 0 bytes
+ 5 files changed, 2 insertions(+)
+ delete mode 100644 server_py/__pycache__/__init__.cpython-311.pyc
+ delete mode 100644 server_py/__pycache__/__main__.cpython-311.pyc
+ delete mode 100644 server_py/__pycache__/http_server.cpython-311.pyc
+ delete mode 100644 server_py/__pycache__/nats_proxy.cpython-311.pyc
+
+diff --git a/.gitignore b/.gitignore
+index 3cb9366..965eec2 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,5 @@
+ node_modules/
+ dist-client/
+ dist-server/
++__pycache__/
++*.pyc
+diff --git a/server_py/__pycache__/__init__.cpython-311.pyc b/server_py/__pycache__/__init__.cpython-311.pyc
+deleted file mode 100644
+index 211ec188c9d2e9d62baf8a499524a7e23912166a..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 152
+zcmZ3^%ge<81T*+pvOx4>5CH>>P{wCAAY(d13PUi1CZpd<h9V{)|1(JPm$rUJer~FM
+zX>n?ieqLfpadJ*(YF>#xkXx2o6kkxOA0MBYmst`YuUAm{i^C>2KczG$)vkyYs25~<
+UF+Y&_z|6?V_<;dN6fpzE02?hKvj6}9
+
+diff --git a/server_py/__pycache__/__main__.cpython-311.pyc b/server_py/__pycache__/__main__.cpython-311.pyc
+deleted file mode 100644
+index f6c1bb1879c58c0212fc5a5b38d310c3dee9a1c2..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 3894
+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
+Z+nYFA9sA(qM<=UZZm|gO0I_!r{{z$HTv`AC
+
+diff --git a/server_py/__pycache__/http_server.cpython-311.pyc b/server_py/__pycache__/http_server.cpython-311.pyc
+deleted file mode 100644
+index 1166a405d1a4673929b8f9389a57acd17bceac82..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 3382
+zcmbUjT~8a?_0G(-$DY9k6R-^?DcPi8!v@n9(yw%*4Pl#-##uqsY-lCRcqYNDzj|l9
+ze8i}h5>?q1(xNmKe%MNWh*GMwQu@&6wo!k;j5QUbk*JXR(tY!aKA`PO&mChMvrt97
+zbLZSMXU;wM+;h*z{jJ9%AZUN~;-!B$5&9?nXf*y1*{=Yyg(M^~X*5qqHqB(%d6uC#
+zm*z5f9s`agN7|8b&N~5j%6O?UA4xoXxf){cW6AXx&%00Hv2~$*z~crUQSwNF%u1r%
+zAu($p&z9tAN^(jaj~(+~iJ3zY@8^^pi!c^`KcOzd$SunYpEE!N+#O4(%KId@vTE@}
+z{&_)GRLe<ZwLr2-%F<|5%SZ6;FK`ImL=5a(J@S94iN64*myKCyohdREw)uGkDWVrJ
+z=Vf!=Be2;+?k8xA`z6?{h?ZcTdXt#G28z~M)!qC+MW$WGI#*;#sK`|uEuI!uWZSuq
+zt;l>6ed~x0>$r%Q;N<H~Z6GkV&aZWLAKH5)mK&*OTC7XWa|2mogWj&ix+B|l0ja^p
+zUxY3q!ZGL`+PJZdR=9g;nJGFd&9iOs!KokH(Ymwfl(<7(-a6F|4hgp`+OAEzO*TFT
+zd5%MQH$k5F=;{r;=#ZQ(d8g{iORg7SrI$@_IF-}guG0(fgqKZkIHsWm8VZLR_Jf9<
+z4Xuuj?LK)-!hhc2oVyy*PVoa@<Ntm3BSawnv)m@L5x$K6AB~DMYQ>o4mE`-0LRyV0
+zGWkd*7FJjDvc)HJ*{qyYEv`V)7N0LHq*KbG#Vdt{B}(S=iPdy2Az8@c7v+Q`6U7pw
+zlyW#N(oHZZYx(ZV3v;>Thq5{=EBRbj0m*qH=MzM>xI{irsOyss3aH~+?z?lhlm~aH
+z2KdhO2X`#Iq~x-egD$05SW2h~%RRl4l=Er|=-dNYCDdC84F}6HJv)1Q)^be!`1ag%
+zgeNouTI{kyXn<Ibyq$lzjPihlD8U6-obFbkjDz*|<ydqvmyx3dFh?{CSu2@N$yqg8
+zw@y628eLS?{GqYN@~f5)(wt&%F}|3{N@<ypuY)+6Ka>b~;lJQ1p<Q=};XbFk2MzaN
+z>6$5Yd^+;U$mU&LIBN)JHGD$fJ0E@?(k}hLIR8#5w%gIWx$yC=ja#MZJ-)Yw7{}YD
+z_spl6Pcr40?j1F}qnhi4zSkS5p>9X_{{~Nzrs&=H&aahc>qa0_6(gD$sj-}=Z#NKn
+zwpO|DJgf&sjlk$8-oyvHX9i$-PhSg|UBOLPjRV@j!NFc2w6*edrQ*~B!$x5E$qlnJ
+zQ2uVU^P<*y(e#J5GEXy=>)XB0Z|eSW!#}Qdo!m`dU-@3uH>CN74riG?!E)cT+c0e1
+zczUCJZ=2P7Mvb1)CPD8RHhPA?;Blb)-v~erVc#180d@D6e^&KHG+zW3+wl)o{X@Dx
+zZ1}@k*9rZ=^mJ`}@S6*tT{8MF{XzNtx)Hsm^-XCW+RYB%lj$!w<h{<+E+Buf7Di&%
+zj?iBf`gLKz5C$}SLN`TE=|>7p&VPN|`CbqE+S_+6%)Sl_*CrjWCm4WjRg#9*BY5{?
+z0P0l|DjDGQ)>g?FwVBhPrnIsmBe81`a_u<~G6EN~1Vv4#sbpMAku@QemE@JNMKzO-
+zaKsM_)C0TYy;NFm#B_wULyZi>Z-p)~I7lwSV2MgT(Ts`+P(~?77(hKL%)q&44=Y!U
+zz<6n9SM(ZUs64Yhpbt#y;$=g;tl`W1z>93bb`U3<8vrsbzjSl^BT(Mo@S?yLQIVCH
+zD=@9d0LI!F+cHe$h`E62ut}WSyg-4`K#Nv^q1OlrQ)9x#;FL>2duf2n!_gI+<-f5S
+z9VJJR`^q{;XVIMXl_ohQUTu~U&=hvlDr%r93rFmVwG6t(MVA%JnNSp2Ro3`u9kI9{
+zPTyJUj6Tf6RW6>&-p_q+Y-By+uAja5Za$w*CBa7^1v^QuphDT;6Ot6C>6j)z%PFs<
+z6ctJWrPkfaa#Os{O<f^^TUywT1<bY<)bAAP;xr-G{YXd>IibpNS}`W!&p5owuK++|
+z6+9bJT?iRMs5E5;-zrT#>CkbnIWSV1(p*6u_w8Z+@yrhPSFwMy@b`039giD$T*Kq0
+zFH~OCeM6-gllSfL!73lr`F?}%r}=f#bcq|nj_YjIb+(+^?$=!thHFA|O_+6Y!72`x
+zd$qxD{OS8TzG~pB8os(GdP_581oVn9u}CMO*A-eR)x~sbfl$W+Go^C0fYdE1&;k>;
+z>yljwEq=CsIVL^8Y@3qMXd%>K7N@9$jL}bOgWn;0CEGw>x~^n$QXwtBL#RK~+peMm
+zfUL|gCK5~bW1^te-uF;IYwvsLyw=`p&aW}v%G~px)({}C=8VZ18#@lJGc5D%vhvx(
+s8UkcnF``#(>^Klarn80slqc-r)tOi7AHn26`HS+mU)ad0z~1tI0ZxeC=l}o!
+
+diff --git a/server_py/__pycache__/nats_proxy.cpython-311.pyc b/server_py/__pycache__/nats_proxy.cpython-311.pyc
+deleted file mode 100644
+index c538c1214811caf8a80b79fba2f51c0db153d703..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 7352
+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
+aGu&>iv}Wxh!@z~h!*A&Lw-w$}-2VrRAB6t^
+
+-- 
+2.43.0
+
